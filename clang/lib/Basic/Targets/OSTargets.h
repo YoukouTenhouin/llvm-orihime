@@ -888,6 +888,24 @@ public:
   }
 };
 
+// Orihime target
+template <typename Target>
+class LLVM_LIBRARY_VISIBILITY OrihimeTargetInfo
+    : public OSTargetInfo<Target> {
+    void getOSDefines(const LangOptions &Opts, const llvm::Triple &Triple,
+                      MacroBuilder &Builder) const final {
+        Builder.defineMacro("__ORIHIME");
+        Builder.defineMacro("__ELF__");
+
+        if (Opts.POSIXThreads)
+            Builder.defineMacro("_REENTRANT");
+    }
+public:
+    OrihimeTargetInfo(const llvm::Triple &Triple, const TargetOptions &Opts)
+	: OSTargetInfo<Target>(Triple, Opts) {
+    }
+};
+
 // WebAssembly target
 template <typename Target>
 class LLVM_LIBRARY_VISIBILITY WebAssemblyOSTargetInfo

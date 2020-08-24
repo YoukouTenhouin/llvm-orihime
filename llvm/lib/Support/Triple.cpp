@@ -210,6 +210,7 @@ StringRef Triple::getOSTypeName(OSType Kind) {
   case NaCl: return "nacl";
   case NetBSD: return "netbsd";
   case OpenBSD: return "openbsd";
+  case Orihime: return "orihime";
   case PS4: return "ps4";
   case RTEMS: return "rtems";
   case Solaris: return "solaris";
@@ -523,6 +524,7 @@ static Triple::OSType parseOS(StringRef OSName) {
     .StartsWith("amdpal", Triple::AMDPAL)
     .StartsWith("hermit", Triple::HermitCore)
     .StartsWith("hurd", Triple::Hurd)
+    .StartsWith("orihime", Triple::Orihime)
     .StartsWith("wasi", Triple::WASI)
     .StartsWith("emscripten", Triple::Emscripten)
     .Default(Triple::UnknownOS);

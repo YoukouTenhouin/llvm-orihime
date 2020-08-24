@@ -552,6 +552,8 @@ TargetInfo *AllocateTarget(const llvm::Triple &Triple,
       return new KFreeBSDTargetInfo<X86_64TargetInfo>(Triple, Opts);
     case llvm::Triple::Solaris:
       return new SolarisTargetInfo<X86_64TargetInfo>(Triple, Opts);
+    case llvm::Triple::Orihime:
+	return new OrihimeTargetInfo<X86_64TargetInfo>(Triple, Opts);
     case llvm::Triple::Win32: {
       switch (Triple.getEnvironment()) {
       case llvm::Triple::Cygnus:
