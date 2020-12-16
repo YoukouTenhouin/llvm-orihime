@@ -39,17 +39,14 @@ void orihime::Linker::ConstructJob(Compilation &C, const JobAction &JA,
   ArgStringList CmdArgs;
 
   const char *Exec = Args.MakeArgString(ToolChain.GetLinkerPath());
-  if (llvm::sys::path::filename(Exec).equals_lower("lld") ||
-      llvm::sys::path::stem(Exec).equals_lower("lld")) {
+  if (llvm::sys::path::filename(Exec).equals_lower("ld.lld") ||
+      llvm::sys::path::stem(Exec).equals_lower("ld.lld")) {
     CmdArgs.push_back("-z");
     CmdArgs.push_back("separate-loadable-segments");
   }
 
   if (!D.SysRoot.empty())
     CmdArgs.push_back(Args.MakeArgString("--sysroot=" + D.SysRoot));
-
-  if (!Args.hasArg(options::OPT_shared) && !Args.hasArg(options::OPT_r))
-    CmdArgs.push_back("-pie");
 
   if (Args.hasArg(options::OPT_s))
     CmdArgs.push_back("-s");
@@ -69,8 +66,13 @@ void orihime::Linker::ConstructJob(Compilation &C, const JobAction &JA,
   CmdArgs.push_back("-o");
   CmdArgs.push_back(Output.getFilename());
 
+  AddLinkerInputs(ToolChain, Inputs, Args, CmdArgs, JA);
   if (!Args.hasArg(options::OPT_nostdlib, options::OPT_nostartfiles)) {
-    CmdArgs.push_back(Args.MakeArgString(ToolChain.GetFilePath("Scrt1.o")));
+    CmdArgs.push_back("-losrt");
+
+    // AddRunTimeLibs(ToolChain, D, CmdArgs, Args);
+
+    // TODO: pthread
   }
 
   Args.AddAllArgs(CmdArgs, options::OPT_L);
@@ -80,26 +82,12 @@ void orihime::Linker::ConstructJob(Compilation &C, const JobAction &JA,
 
   if (D.isUsingLTO()) {
     assert(!Inputs.empty() && "Must have at least one input.");
-    AddGoldPlugin(ToolChain, Args, CmdArgs, Output, Inputs[0],
+    addLTOOptions(ToolChain, Args, CmdArgs, Output, Inputs[0],
                   D.getLTOMode() == LTOK_Thin);
   }
 
-  bool NeedSanitizerDeps = addSanitizerRuntimes(ToolChain, Args, CmdArgs);
-  bool NeedsXRayDeps = addXRayRuntime(ToolChain, Args, CmdArgs);
-  AddLinkerInputs(ToolChain, Inputs, Args, CmdArgs, JA);
-  ToolChain.addProfileRTLibs(Args, CmdArgs);
-
-  if (NeedSanitizerDeps)
-    linkSanitizerRuntimeDeps(ToolChain, CmdArgs);
-
-  if (NeedsXRayDeps)
-    linkXRayRuntimeDeps(ToolChain, CmdArgs);
-
-  AddRunTimeLibs(ToolChain, D, CmdArgs, Args);
-
-  // TODO: pthread
-
-  C.addCommand(std::make_unique<Command>(JA, *this, Exec, CmdArgs, Inputs));
+  C.addCommand(std::make_unique<Command>(JA, *this, ResponseFileSupport::None(),
+                                         Exec, CmdArgs, Inputs, Output));
 }
 
 /// Orihime -- Orihime tool chain
@@ -112,8 +100,8 @@ Orihime::Orihime(const Driver &D, const llvm::Triple &Triple,
 
   if (!D.SysRoot.empty()) {
     SmallString<128> P(D.SysRoot);
-    llvm::sys::path::append(P, "lib");
-    getFilePaths().push_back(P.str());
+    llvm::sys::path::append(P, "resource", "development", "library");
+    getFilePaths().push_back(std::string(P.str()));
   }
 
   auto FilePaths = [&](const Multilib &M) -> std::vector<std::string> {
@@ -122,7 +110,7 @@ Orihime::Orihime(const Driver &D, const llvm::Triple &Triple,
       if (auto CXXStdlibPath = getCXXStdlibPath()) {
         SmallString<128> P(*CXXStdlibPath);
         llvm::sys::path::append(P, M.gccSuffix());
-        FP.push_back(P.str());
+        FP.push_back(std::string(P.str()));
       }
     }
     return FP;
@@ -131,13 +119,6 @@ Orihime::Orihime(const Driver &D, const llvm::Triple &Triple,
   Multilibs.push_back(Multilib());
   // Use the noexcept variant with -fno-exceptions to avoid the extra overhead.
   Multilibs.push_back(Multilib("noexcept", {}, {}, 1)
-                          .flag("-fexceptions")
-                          .flag("+fno-exceptions"));
-  // ASan has higher priority because we always want the instrumentated version.
-  Multilibs.push_back(Multilib("asan", {}, {}, 2).flag("+fsanitize=address"));
-  // Use the asan+noexcept variant with ASan and -fno-exceptions.
-  Multilibs.push_back(Multilib("asan+noexcept", {}, {}, 3)
-                          .flag("+fsanitize=address")
                           .flag("-fexceptions")
                           .flag("+fno-exceptions"));
   Multilibs.FilterOut([&](const Multilib &M) {
@@ -150,7 +131,6 @@ Orihime::Orihime(const Driver &D, const llvm::Triple &Triple,
   addMultilibFlag(
       Args.hasFlag(options::OPT_fexceptions, options::OPT_fno_exceptions, true),
       "fexceptions", Flags);
-  addMultilibFlag(getSanitizerArgs().needsAsanRt(), "fsanitize=address", Flags);
   Multilibs.setFilePathsCallback(FilePaths);
 
   if (Multilibs.select(Flags, SelectedMultilib))
@@ -163,7 +143,7 @@ Orihime::Orihime(const Driver &D, const llvm::Triple &Triple,
 std::string Orihime::ComputeEffectiveClangTriple(const llvm::opt::ArgList &Args,
                                                  types::ID InputType) const {
   llvm::Triple Triple(ComputeLLVMTriple(Args, InputType));
-  return (Triple.getArchName() + "-" + Triple.getOSName()).str();
+  return Triple.str();
 }
 
 Tool *Orihime::buildLinker() const { return new tools::orihime::Linker(*this); }
@@ -174,7 +154,7 @@ Orihime::GetRuntimeLibType(const llvm::opt::ArgList &Args) const {
     StringRef Value = A->getValue();
     if (Value != "compiler-rt")
       getDriver().Diag(clang::diag::err_drv_invalid_rtlib_name)
-          << A->getAsString(Args) :
+          << A->getAsString(Args);
   }
 
   return ToolChain::RLT_CompilerRT;
@@ -195,9 +175,12 @@ Orihime::GetCXXStdlibType(const llvm::opt::ArgList &Args) const {
 void Orihime::addClangTargetOptions(const llvm::opt::ArgList &DriverArgs,
                                     llvm::opt::ArgStringList &CC1Args,
                                     Action::OffloadKind) const {
-  if (DriverArgs.hasFlag(options::OPT_fuse_init_array,
-                         options::OPT_fno_use_init_array, true))
-    CC1Args.push_back("-fuse-init-array");
+  if (!DriverArgs.hasFlag(options::OPT_fuse_init_array,
+                          options::OPT_fno_use_init_array, true))
+    CC1Args.push_back("-fno-use-init-array");
+
+  // no float support yet
+  CC1Args.push_back("-no-implicit-float");
 }
 
 void Orihime::AddClangSystemIncludeArgs(
@@ -229,11 +212,9 @@ void Orihime::AddClangSystemIncludeArgs(
     return;
   }
 
-  if (!D.SysRoot.empty()) {
-    SmallString<128> P(D.SysRoot);
-    llvm::sys::path::append(P, "include");
-    addExternCSystemInclude(DriverArgs, CC1Args, P.str());
-  }
+  SmallString<128> P(D.SysRoot.empty() ? "/" : D.SysRoot);
+  llvm::sys::path::append(P, "resource", "development", "include");
+  addExternCSystemInclude(DriverArgs, CC1Args, P.str());
 }
 
 void Orihime::AddClangCXXStdlibIncludeArgs(
@@ -243,10 +224,11 @@ void Orihime::AddClangCXXStdlibIncludeArgs(
       DriverArgs.hasArg(options::OPT_nostdincxx))
     return;
 
+  const Driver &D = getDriver();
+  SmallString<128> P(D.SysRoot.empty() ? "/" : D.SysRoot);
   switch (GetCXXStdlibType(DriverArgs)) {
   case ToolChain::CST_Libcxx: {
-    SmallString<128> P(getDriver().Dir);
-    llvm::sys::path::append(P, "..", "include", "c++", "v1");
+    llvm::sys::path::append(P, "resource", "development", "include", "libcxx");
     addSystemInclude(DriverArgs, CC1Args, P.str());
     break;
   }
@@ -268,18 +250,6 @@ void Orihime::AddCXXStdlibLibArgs(const llvm::opt::ArgList &Args,
   }
 }
 
-SanitizerMask Orihime::getSupportedSanitizers() const {
-  SanitizerMask Res = ToolChain::getSupportedSanitizers();
-  Res |= SanitizerKind::Address;
-  Res |= SanitizerKind::PointerCompare;
-  Res |= SanitizerKind::PointerSubtract;
-  Res |= SanitizerKind::Fuzzer;
-  Res |= SanitizerKind::FuzzerNoLink;
-  Res |= SanitizerKind::SafeStack;
-  Res |= SanitizerKind::Scudo;
-  return Res;
-}
+SanitizerMask Orihime::getSupportedSanitizers() const { return {}; }
 
-SanitizerMask Orihime::getDefaultSanitizers() const {
-  return SanitizerKind::SafeStack;
-}
+SanitizerMask Orihime::getDefaultSanitizers() const { return {}; }

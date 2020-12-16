@@ -18,7 +18,10 @@
 #error MSVC does not have inttypes.h prior to Visual Studio 2013
 #endif
 
+/* Orihime does not have a inttypes.h */
+#ifndef __ORIHIME
 #include_next <inttypes.h>
+#endif
 
 #if defined(_MSC_VER) && _MSC_VER < 1900
 /* MSVC headers define int32_t as int, but PRIx32 as "lx" instead of "x".
